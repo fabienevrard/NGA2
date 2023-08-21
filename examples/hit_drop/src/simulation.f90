@@ -46,10 +46,10 @@ module simulation
    real(WP) :: ReL_tgt,ReT_tgt,eta_tgt,taueta_tgt,We_tgt,inject_time
    real(WP) :: TKE,URMS
    real(WP) :: tauinf,G,Gdtau,Gdtaui,dx
-   real(WP), dimension(3) :: center
+   real(WP), dimension(3) :: center, previouscenter, centerdiff
    real(WP) :: radius
    integer :: npart
-   logical :: normal_only
+   logical :: normal_only, retain_angular_position
 
    !> For monitoring
    real(WP) :: EPS
@@ -205,7 +205,7 @@ contains
          call vf%initialize(cfg=cfg,reconstruction_method=lvira,name='VOF')
          ! Initialize two droplets
          call param_read('Droplet diameter',radius); radius=0.5_WP*radius
-         call param_read('Droplet position',center)      
+         call param_read('Droplet position',center); previouscenter=center
          ! Update the band
          call vf%update_band()
          ! Perform interface reconstruction from VOF field
@@ -220,6 +220,8 @@ contains
          call vf%get_curvature()
          ! Reset moments to guarantee compatibility with interface reconstruction
          call vf%reset_volume_moments()
+         ! We're gonna need the old liquid barycenter
+         allocate(vf%Lbaryold(3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_)); vf%Lbaryold=0.0_WP
       end block create_vof
 
       ! Create a single-phase flow solver without bconds
@@ -321,6 +323,8 @@ contains
          call param_read('Number of tracers',npart)
          ! Remove tangential component
          call param_read('Remove tangential motion',normal_only,default=.true.)
+         ! Retain angular position
+         call param_read('Retain angular position',retain_angular_position,default=.true.)
          ! Create solver
          pt=tracer(cfg=cfg,name='PT')
          ! Initialize with zero particles
@@ -330,14 +334,14 @@ contains
       ! Create partmesh object for Lagrangian particle output
       create_pmesh: block
          integer :: i
-         pmesh=partmesh(nvar=0,nvec=2,name='tracers')
-         pmesh%vecname(1)='velocity'
-         pmesh%vecname(2)='acceleration'
+         pmesh=partmesh(nvar=0,nvec=0,name='tracers')
+         ! pmesh%vecname(1)='velocity'
+         ! pmesh%vecname(2)='acceleration'
          call pt%update_partmesh(pmesh)
-         do i=1,pt%np_
-            pmesh%vec(:,1,i)=pt%p(i)%vel
-            pmesh%vec(:,2,i)=pt%p(i)%acc
-         end do
+         ! do i=1,pt%np_
+         !    pmesh%vec(:,1,i)=pt%p(i)%vel
+         !    pmesh%vec(:,2,i)=pt%p(i)%acc
+         ! end do
       end block create_pmesh
       
       ! Add Ensight output
@@ -470,6 +474,7 @@ contains
                      pt%p(np0_+i)%pos(1)=center(1)+radius*sin(thetak)*cos(phik)
                      pt%p(np0_+i)%pos(2)=center(2)+radius*sin(thetak)*sin(phik)
                      pt%p(np0_+i)%pos(3)=center(3)+radius*cos(thetak)
+                     pt%p(np0_+i)%vel=(pt%p(np0_+i)%pos-center)/radius
                      ! Localize the particle
                      pt%p(np0_+i)%ind=cfg%get_ijk_global(pt%p(np0_+i)%pos,[cfg%imin,cfg%jmin,cfg%kmin])
                      ! Make it an "official" particle
@@ -484,6 +489,7 @@ contains
 
          ! Remember old VOF
          vf%VFold=vf%VF
+         vf%Lbaryold=vf%Lbary
 
          ! Remember old velocity
          fs%Uold=fs%U
@@ -496,9 +502,129 @@ contains
          ! VOF solver step
          call vf%advance(dt=time%dt,U=fs%U,V=fs%V,W=fs%W)
 
+         ! Track droplet centroid
+         compute_change_drop_barycenter: block
+            use vfs_class,only: VFhi,VFlo,advect_band
+            use mpi_f08,  only: MPI_ALLREDUCE,MPI_SUM
+            use parallel, only: MPI_REAL_WP
+            integer :: i,j,k,index,ierr
+            real(WP) :: mymass,mass
+            real(WP), dimension(3) :: mycenterdiff
+            mymass=0.0_WP;mycenterdiff=[0.0_WP,0.0_WP,0.0_WP]
+            ! First loop over advection band
+            do index=1,sum(vf%band_count(0:advect_band))
+               i=vf%band_map(1,index)
+               j=vf%band_map(2,index)
+               k=vf%band_map(3,index)
+               ! Skip wall/bcond cells - bconds need to be provided elsewhere directly!
+               if (vf%mask(i,j,k).ne.0) cycle
+               if (i.eq.cfg%imin_.and.cfg%iproc.eq.1) then
+                  mycenterdiff=mycenterdiff+getVolumePtr(vf%face_flux(1,i,j,k),0)*[cfg%xL,0.0_WP,0.0_WP]
+               end if
+               if (j.eq.cfg%jmin_.and.cfg%jproc.eq.1) then
+                  mycenterdiff=mycenterdiff+getVolumePtr(vf%face_flux(2,i,j,k),0)*[0.0_WP,cfg%yL,0.0_WP]
+               end if
+               if (k.eq.cfg%kmin_.and.cfg%kproc.eq.1) then
+                  mycenterdiff=mycenterdiff+getVolumePtr(vf%face_flux(3,i,j,k),0)*[0.0_WP,0.0_WP,cfg%zL]
+               end if
+            end do
+            ! Then loop over remaining cells (empty or full)
+            do k=fs%cfg%kmin_,fs%cfg%kmax_
+               do j=fs%cfg%jmin_,fs%cfg%jmax_
+                  do i=fs%cfg%imin_,fs%cfg%imax_
+                     mymass=mymass+vf%VF(i,j,k)*cfg%vol(i,j,k)
+                     mycenterdiff=mycenterdiff-vf%Lbaryold(:,i,j,k)*vf%VFold(i,j,k)*cfg%vol(i,j,k)
+                     mycenterdiff=mycenterdiff+vf%Lbary(:,i,j,k)*vf%VF(i,j,k)*cfg%vol(i,j,k)
+                     if (i.eq.cfg%imin_.and.cfg%iproc.eq.1.and.minval(abs(vf%band(i-1:i,j,k))).gt.advect_band) then
+                        mycenterdiff=mycenterdiff+fs%U(i,j,k)*vf%VF(i,j,k)*time%dt*dx*dx*[cfg%xL,0.0_WP,0.0_WP]
+                     end if
+                     if (j.eq.cfg%jmin_.and.cfg%jproc.eq.1.and.minval(abs(vf%band(i,j-1:j,k))).gt.advect_band) then
+                        mycenterdiff=mycenterdiff+fs%V(i,j,k)*vf%VF(i,j,k)*time%dt*dx*dx*[0.0_WP,cfg%yL,0.0_WP]
+                     end if
+                     if (k.eq.cfg%kmin_.and.cfg%kproc.eq.1.and.minval(abs(vf%band(i,j,k-1:k))).gt.advect_band) then
+                        mycenterdiff=mycenterdiff+fs%W(i,j,k)*vf%VF(i,j,k)*time%dt*dx*dx*[0.0_WP,0.0_WP,cfg%zL]
+                     end if
+                  end do
+               end do
+            end do
+            ! Reduce to all procs
+            call MPI_ALLREDUCE(mymass,mass,1,MPI_REAL_WP,MPI_SUM,fs%cfg%comm,ierr);
+            call MPI_ALLREDUCE(mycenterdiff,centerdiff,3,MPI_REAL_WP,MPI_SUM,fs%cfg%comm,ierr);centerdiff=centerdiff/mass
+         end block compute_change_drop_barycenter
+
+
          ! Advance and project tracer particles on the interface
-         if (.not.normal_only) then
+         if (.not.normal_only.and..not.retain_angular_position) then
             call pt%advance(dt=time%dtmid,U=fs%U,V=fs%V,W=fs%W)
+            call project_tracers(vf=vf,pt=pt)
+         else if (retain_angular_position) then
+            advance_tracers_fixed_angle: block
+               use mpi_f08,  only: MPI_ALLREDUCE,MPI_SUM
+               use parallel, only: MPI_REAL_WP
+               real(WP), dimension(3) :: old_pos
+               real(WP) :: r,theta,phi,maxdist,dist,new_dist
+               integer :: i,j,ierr,maxit
+
+               ! First move particles based on new center of mass
+               do i=1,pt%np_
+                  ! Move particle based on center of mass position
+                  pt%p(i)%pos=pt%p(i)%pos+centerdiff
+                  ! pt%p(i)%pos=pt%p(i)%pos+time%dt*massvel
+                  ! Correct the position to take into account periodicity
+                  pt%p(i)%pos(1)=cfg%x(cfg%imin)+modulo(pt%p(i)%pos(1)-cfg%x(cfg%imin),cfg%xL)
+                  pt%p(i)%pos(2)=cfg%y(cfg%jmin)+modulo(pt%p(i)%pos(2)-cfg%y(cfg%jmin),cfg%yL)
+                  pt%p(i)%pos(3)=cfg%z(cfg%kmin)+modulo(pt%p(i)%pos(3)-cfg%z(cfg%kmin),cfg%zL)
+                  ! Relocalize the tracer
+                  pt%p(i)%ind=cfg%get_ijk_global(pt%p(i)%pos,pt%p(i)%ind)
+               end do
+               ! Communicate tracers across procs
+               call pt%sync()
+
+               ! Maximum projection iterations
+               maxit=50
+               ! Maximum distance from the interface wanted
+               maxdist=1.0E-9_WP*dx
+               ! Iteration for projection on the zero level-set
+               do j=1,maxit
+                  ! Loop over local tracers
+                  do i=1,pt%np_
+                     ! Avoid particles with id=0
+                     if (pt%p(i)%id.eq.0) cycle
+                     ! Interpolate distance function
+                     dist=cfg%get_scalar(pos=pt%p(i)%pos,i0=pt%p(i)%ind(1),j0=pt%p(i)%ind(2),k0=pt%p(i)%ind(3),S=vf%G,bc='n')
+                     if (abs(dist).gt.maxdist) then
+                        ! Move tracer along distance function gradient
+                        old_pos=pt%p(i)%pos
+                        dist=min(dx,dist)
+                        pt%p(i)%pos=old_pos+dist*pt%p(i)%vel
+                        new_dist=cfg%get_scalar(pos=pt%p(i)%pos,i0=pt%p(i)%ind(1),j0=pt%p(i)%ind(2),k0=pt%p(i)%ind(3),S=vf%G,bc='n')
+                        pt%p(i)%pos=old_pos+(dist*dist/(dist-new_dist))*pt%p(i)%vel
+                        ! Correct the position to take into account periodicity
+                        pt%p(i)%pos(1)=cfg%x(cfg%imin)+modulo(pt%p(i)%pos(1)-cfg%x(cfg%imin),cfg%xL)
+                        pt%p(i)%pos(2)=cfg%y(cfg%jmin)+modulo(pt%p(i)%pos(2)-cfg%y(cfg%jmin),cfg%yL)
+                        pt%p(i)%pos(3)=cfg%z(cfg%kmin)+modulo(pt%p(i)%pos(3)-cfg%z(cfg%kmin),cfg%zL)
+                        ! Relocalize the tracer
+                        pt%p(i)%ind=cfg%get_ijk_global(pt%p(i)%pos,pt%p(i)%ind)
+                     end if
+                  end do
+                  ! Communicate tracers across procs
+                  call pt%sync()
+               end do
+               ! Log/screen output
+               logging: block
+                  use, intrinsic :: iso_fortran_env, only: output_unit
+                  use param,    only: verbose
+                  use messager, only: log
+                  use string,   only: str_long
+                  character(len=str_long) :: message
+                  if (cfg%amRoot) then
+                     write(message,'("Tracer solver [",a,"] on partitioned grid [",a,"]: ",i0," particles were advanced")') trim(pt%name),trim(cfg%name),pt%np
+                     if (verbose.gt.1) write(output_unit,'(a)') trim(message)
+                     if (verbose.gt.0) call log(message)
+                  end if
+               end block logging
+               previouscenter=previouscenter+centerdiff
+            end block advance_tracers_fixed_angle
          else
             advance_tracers_normally: block
                use mathtools, only: Pi,normalize
@@ -579,8 +705,8 @@ contains
                   end if
                end block logging
             end block advance_tracers_normally
+            call project_tracers(vf=vf,pt=pt)
          end if
-         call project_tracers(vf=vf,pt=pt)
 
          ! Prepare new staggered viscosity (at n+1)
          call fs%get_viscosity(vf=vf)
@@ -682,10 +808,10 @@ contains
             update_pmesh: block
               integer :: i
               call pt%update_partmesh(pmesh)
-              do i=1,pt%np_
-                  pmesh%vec(:,1,i)=pt%p(i)%vel
-                  pmesh%vec(:,2,i)=pt%p(i)%acc
-              end do
+            !   do i=1,pt%np_
+            !       pmesh%vec(:,1,i)=pt%p(i)%vel
+            !       pmesh%vec(:,2,i)=pt%p(i)%acc
+            !   end do
             end block update_pmesh
             call ens_out%write_data(time%t)
          end if

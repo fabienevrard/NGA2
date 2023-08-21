@@ -36,9 +36,9 @@ module vfs_class
    integer, parameter, public :: nonrecurs_simplex=2 !< Non-recursive simplex cutting
    
    ! Default parameters for volume fraction solver
-   integer,  parameter :: nband=3                                 !< Number of cells around the interfacial cells on which localized work is performed
-   integer,  parameter :: advect_band=1                           !< How far we do the transport
-   integer,  parameter :: distance_band=2                         !< How far we build the distance
+   integer,  parameter, public :: nband=3                                 !< Number of cells around the interfacial cells on which localized work is performed
+   integer,  parameter, public :: advect_band=1                           !< How far we do the transport
+   integer,  parameter, public :: distance_band=2                         !< How far we build the distance
    integer,  parameter :: max_interface_planes=2                  !< Maximum number of interfaces allowed (2 for R2P)
    real(WP), parameter :: VFlo=1.0e-12_WP                         !< Minimum VF value considered
    real(WP), parameter :: VFhi=1.0_WP-VFlo                        !< Maximum VF value considered
@@ -172,7 +172,7 @@ module vfs_class
       procedure, private :: sync_side                     !< Synchronize the IRL objects across one side - another I/O helper
       procedure, private :: sync_ByteBuffer               !< Communicate byte packets across one side - another I/O helper
       procedure, private :: calculate_offset_to_planes    !< Helper routine for I/O
-      procedure, private :: crude_phase_test              !< Helper function that rapidly assess if a mixed cell might be present
+      procedure :: crude_phase_test              !< Helper function that rapidly assess if a mixed cell might be present
       procedure :: project                                !< Function that performs a Lagrangian projection of a vertex
       procedure :: read_interface                         !< Read an IRL interface from a file
       procedure :: write_interface                        !< Write an IRL interface to a file

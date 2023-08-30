@@ -334,7 +334,8 @@ contains
       ! Create partmesh object for Lagrangian particle output
       create_pmesh: block
          integer :: i
-         pmesh=partmesh(nvar=0,nvec=2,name='tracers')
+         pmesh=partmesh(nvar=1,nvec=2,name='tracers')
+         pmesh%varname(1)='id'
          pmesh%vecname(1)='velocity'
          pmesh%vecname(2)='acceleration'
          call pt%update_partmesh(pmesh)
@@ -811,8 +812,9 @@ contains
               do i=1,pt%np_
                   ! pmesh%vec(:,1,i)=pt%p(i)%vel
                   ! pmesh%vec(:,2,i)=pt%p(i)%acc
-                  pmesh%vec(:,1,i)=cfg%get_velocity(pos=pt%p(i)%pos,i0=pt%p(i)%ind(1),j0=pt%p(i)%ind(2),k0=pt%p(i)%ind(3),U=fs%U,V=fs%V,W=fs%W)
-                  pmesh%vec(:,2,i)=(pmesh%vec(:,1,i)-cfg%get_velocity(pos=pt%p(i)%pos,i0=pt%p(i)%ind(1),j0=pt%p(i)%ind(2),k0=pt%p(i)%ind(3),U=fs%Uold,V=fs%Vold,W=fs%Wold))/time%dt
+               pmesh%var(1,i)=real(pt%p(i)%id,WP)
+               pmesh%vec(:,1,i)=cfg%get_velocity(pos=pt%p(i)%pos,i0=pt%p(i)%ind(1),j0=pt%p(i)%ind(2),k0=pt%p(i)%ind(3),U=fs%U,V=fs%V,W=fs%W)
+               pmesh%vec(:,2,i)=(pmesh%vec(:,1,i)-cfg%get_velocity(pos=pt%p(i)%pos,i0=pt%p(i)%ind(1),j0=pt%p(i)%ind(2),k0=pt%p(i)%ind(3),U=fs%Uold,V=fs%Vold,W=fs%Wold))/time%dt
                end do
             end block update_pmesh
             call ens_out%write_data(time%t)

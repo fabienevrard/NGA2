@@ -20,6 +20,7 @@ Retain angular position :  T
 # Time integration
 Max timestep size : 5e-3
 Max cfl number :    0.9
+Max steps :        5000
 
 # Ensight output
 Ensight output period : 1e-2
